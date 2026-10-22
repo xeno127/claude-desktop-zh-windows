@@ -1,0 +1,21 @@
+{
+  "engine": "@formatjs/icu-messageformat-parser 3.5.22",
+  "catalogs": [
+    {
+      "path": "ion-dist/i18n/",
+      "entries": 36153,
+      "errors": []
+    },
+    {
+      "path": "",
+      "entries": 861,
+      "errors": []
+    },
+    {
+      "path": "ion-dist/i18n/dynamic/",
+      "entries": 49,
+      "errors": []
+    }
+  ],
+  "scope": "ICU 语法及各分支变量/富文本结构；不代表全部页面人工审校"
+}

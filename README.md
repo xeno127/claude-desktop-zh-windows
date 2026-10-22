@@ -1,14 +1,14 @@
 # Claude Desktop 默认中文补丁（Windows）
 
-安装一次，以后从开始菜单或 Windows 搜索直接打开 **Claude**，默认显示简体中文，日常不会弹出 CMD。
+安装完成后，从开始菜单或 Windows 搜索中打开 **Claude**，默认显示简体中文。安装后取消对 Claude 的自动更新，并移除 Cowork 服务。
 
-这是非官方补丁，目前仅支持 **Claude Desktop 3.1623.1.0 x64 的第三方网关模式**。其他版本会停止安装，官方账号模式不在本次验证范围。
+非官方补丁，目前仅支持 **Claude Desktop 3.1623.1.0 x64 的第三方网关模式**。其他版本会停止安装，官方账号模式不在本次验证范围。
 
 ## 快速使用
 
 需要 Windows、Python 3.10 或更新版本，以及本机已安装的受支持版本 Claude Desktop。Python 仅使用标准库，无需安装 pip 依赖。
 
-1. 下载发布 ZIP 并完整解压，保留 `setup.cmd`、Python 文件和 `language-pack` 的相对位置。
+1. 下载发布 ZIP 并完整解压。
 2. 从右下角托盘完全退出 Claude。
 3. 双击 **`setup.cmd`**。
 4. 阅读提示。如检测到商店版，输入 **`REPLACE`** 确认替换；其他输入会取消。

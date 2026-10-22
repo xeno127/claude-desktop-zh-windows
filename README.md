@@ -57,6 +57,6 @@
 
 ## 开源
 
-见[GitHub发布指南](docs/GitHub发布指南.md)、[更新记录](docs/更新记录.md)、[贡献说明](CONTRIBUTING.md)和[来源说明](NOTICE.md)。
+见[贡献说明](CONTRIBUTING.md)和[来源说明](NOTICE.md)。
 
 发布包只包含工具、中文JSON、测试和中文文档，不包含 Claude EXE、DLL、ASAR或完整前端bundle。与 Anthropic 无隶属关系，商标和应用版权归各自权利人。

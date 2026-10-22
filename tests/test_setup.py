@@ -1,8 +1,4 @@
-import argparse
-import importlib.util
-import json
 from pathlib import Path
-import shutil
 import sys
 import tempfile
 import unittest
@@ -11,171 +7,149 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-specification = importlib.util.spec_from_file_location("installer_under_test", ROOT / "setup.py")
-installer = importlib.util.module_from_spec(specification)
-specification.loader.exec_module(installer)
+import claude_zh as pack
 
 
-class MigrationTests(unittest.TestCase):
+class ResourceTransactionTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(prefix="claude-zh-test-", dir=ROOT)
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
-        self.local = self.root / "用户 data"
-        self.local.mkdir()
-        self.config = self.local / "Claude-3p/config.json"
+        self.app = self.root / "app"
+        self.config = self.root / "user/config.json"
+        self.storage = self.root / "state"
+        self.catalog = self.root / "pack/zh-CN.json"
+        self.catalog.parent.mkdir(parents=True)
+        self.catalog.write_text('{"hello":"你好 {name}"}', "utf-8")
         self.config.parent.mkdir()
-        self.original = {"locale": "en-US", "sampleSetting": {"retained": True}}
-        installer.pack.write_json(self.config, self.original)
-        self.target = self.local / "Programs/Claude"
-        self.target.mkdir(parents=True)
-        (self.target / "claude.exe").write_bytes(b"fixture-core")
-        self.manifest = {"installedFiles": {"claude.exe": installer.pack.sha256(self.target / "claude.exe")}}
-        self.package = {"PackageFullName": installer.PACKAGE_VERSION, "PackageFamilyName": installer.PACKAGE_FAMILY, "InstallLocation": str(self.root / "store")}
-        self.events = []
-        for target, replacement in [
-            ("local_path", lambda relative: self.local / relative),
-            ("get_package", lambda: self.package),
-            ("data_roots", lambda config: {"local-Claude-3p": config.parent}),
-            ("install_shortcut", lambda target, backup: self.events.append("shortcut")),
-        ]:
-            patcher = mock.patch.object(installer, target, replacement)
-            patcher.start()
-            self.addCleanup(patcher.stop)
-        for target, replacement in [
-            ("check_pack", lambda: self.manifest),
-            ("config_path", lambda supplied: self.config),
-            ("check_no_processes", lambda: None),
-        ]:
-            patcher = mock.patch.object(installer.pack, target, replacement)
-            patcher.start()
-            self.addCleanup(patcher.stop)
-        patcher = mock.patch.object(installer.shutil, "disk_usage", return_value=shutil._ntuple_diskusage(10**12, 0, 10**12))
-        patcher.start()
-        self.addCleanup(patcher.stop)
+        self.config.write_text('{"locale":"en-US","apiKey":"sample-secret","model":"model-a"}', "utf-8")
+        self.bundle = "resources/bundle.js"
+        self.originals = {
+            "claude.exe": b"official-executable",
+            "resources/app.asar": b"official-asar",
+            "resources/en-US.json": b'{"hello":"Hello {name}"}',
+            self.bundle: ("const languages=" + pack.LANGUAGES + ";const fallback=" + pack.LANGUAGES + ";").encode(),
+        }
+        for relative, content in self.originals.items():
+            target = self.app / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(content)
+        self.manifest = {
+            "version": "3.1623.4.0", "bundlePath": self.bundle,
+            "sourceFiles": {relative: pack.sha256(self.app / relative) for relative in self.originals},
+            "catalogs": {"desktop": {
+                "sourcePath": "en-US.json", "path": "zh-CN.json", "entries": 1,
+                "sha256": pack.sha256(self.catalog),
+            }},
+        }
 
-    def arguments(self, check=False):
-        return argparse.Namespace(config=None, app=None, check=check)
+    def install(self):
+        return pack.install_resources(self.app, self.config, self.storage, self.manifest, self.catalog.parent)
 
-    def remove(self, package):
-        pending = installer.pack.read_json(self.local / "ClaudeZhPatch/pending.json")
-        backup = Path(pending["backup"])
-        state = installer.pack.read_json(backup / "migration.json")
-        self.assertEqual(state["phase"], "prepared")
-        installer.verify_backups(backup, state)
-        self.assertTrue(self.target.is_dir())
-        self.events.append("remove")
-        self.package = None
+    def restore(self, backup):
+        return pack.restore_resources(self.app, self.storage, backup, self.manifest, self.catalog.parent)
 
-    def install_confirmed(self):
-        with mock.patch("builtins.input", return_value="REPLACE"), mock.patch.object(installer, "remove_package", self.remove):
-            installer.install(self.arguments())
+    def test_install_then_restore_keeps_core_and_new_settings(self):
+        backup = self.install()
+        self.assertEqual(pack.read_json(self.config)["locale"], "zh-CN")
+        self.assertEqual((self.app / "resources/zh-CN.json").read_bytes(), self.catalog.read_bytes())
+        for relative in ("claude.exe", "resources/app.asar"):
+            self.assertEqual((self.app / relative).read_bytes(), self.originals[relative])
+        current = pack.read_json(self.config)
+        current["apiKey"] = "new-secret"
+        current["model"] = "model-b"
+        pack.write_json(self.config, current)
+        self.restore(backup)
+        self.assertEqual(pack.read_json(self.config), {"locale": "en-US", "apiKey": "new-secret", "model": "model-b"})
+        self.assertFalse((self.app / "resources/zh-CN.json").exists())
+        self.assertEqual((self.app / self.bundle).read_bytes(), self.originals[self.bundle])
 
-    def test_cancel_writes_nothing(self):
-        with mock.patch("builtins.input", return_value="no"):
-            installer.install(self.arguments())
-        self.assertFalse((self.local / "ClaudeZhPatch").exists())
-        self.assertEqual(installer.pack.read_json(self.config), self.original)
+    def test_write_failure_rolls_back_every_file_and_config(self):
+        original = self.config.read_bytes()
+        writer = pack.write_resource
+        calls = 0
 
-    def test_read_only_check_does_not_prompt_or_write(self):
-        with mock.patch("builtins.input", side_effect=AssertionError("不应询问")):
-            installer.install(self.arguments(check=True))
-        self.assertFalse((self.local / "ClaudeZhPatch").exists())
+        def fail_once(path, content):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise PermissionError("simulated failure")
+            return writer(path, content)
 
-    def test_backup_precedes_removal_and_preserves_settings(self):
-        self.install_confirmed()
-        self.assertEqual(self.events, ["remove", "shortcut"])
-        expected = {**self.original, "locale": "zh-CN"}
-        self.assertEqual(installer.pack.read_json(self.config), expected)
-        info = installer.pack.read_json(self.local / "ClaudeZhPatch/last-install.json")
-        backup = Path(info["backup"])
-        self.assertEqual(installer.pack.read_json(backup / "data/local-Claude-3p/config.json"), self.original)
-        self.assertEqual(installer.pack.read_json(backup / "migration.json")["phase"], "complete")
+        with mock.patch.object(pack, "write_resource", side_effect=fail_once):
+            with self.assertRaises(PermissionError):
+                self.install()
+        self.assertEqual(self.config.read_bytes(), original)
+        self.assertEqual((self.app / self.bundle).read_bytes(), self.originals[self.bundle])
+        self.assertFalse((self.app / "resources/zh-CN.json").exists())
 
-    def test_backup_failure_never_removes_package(self):
-        with mock.patch("builtins.input", return_value="REPLACE"), mock.patch.object(installer, "backup_root", side_effect=OSError("locked")), mock.patch.object(installer, "remove_package") as remove:
-            with self.assertRaises(OSError):
-                installer.install(self.arguments())
-            remove.assert_not_called()
+    def test_permission_probe_failure_writes_no_backup_or_config(self):
+        before = self.config.read_bytes()
+        with mock.patch.object(pack, "probe_writes", side_effect=PermissionError("denied")):
+            with self.assertRaises(PermissionError):
+                self.install()
+        self.assertFalse(self.storage.exists())
+        self.assertEqual(self.config.read_bytes(), before)
 
-    def test_changed_data_never_removes_package(self):
-        with mock.patch("builtins.input", return_value="REPLACE"), mock.patch.object(installer, "verify_live_data", side_effect=RuntimeError("changed")), mock.patch.object(installer, "remove_package") as remove:
-            with self.assertRaisesRegex(RuntimeError, "changed"):
-                installer.install(self.arguments())
-            remove.assert_not_called()
+    def test_updated_core_stops_before_any_write(self):
+        (self.app / "claude.exe").write_bytes(b"new-version")
+        with self.assertRaisesRegex(RuntimeError, "版本|源文件"):
+            self.install()
+        self.assertFalse(self.storage.exists())
 
-    def test_running_application_never_writes_data(self):
-        with mock.patch.object(installer.pack, "check_no_processes", side_effect=RuntimeError("running")):
-            with self.assertRaisesRegex(RuntimeError, "running"):
-                installer.install(self.arguments())
-        self.assertFalse((self.local / "ClaudeZhPatch").exists())
+    def test_reinstall_keeps_original_restore_point(self):
+        backup = self.install()
+        self.assertEqual(self.install(), backup)
+        self.restore(backup)
+        self.assertEqual(pack.read_json(self.config)["locale"], "en-US")
 
-    def test_wrong_target_is_not_overwritten(self):
-        (self.target / "claude.exe").write_bytes(b"different-version")
-        with self.assertRaises(RuntimeError):
-            installer.install(self.arguments())
-        self.assertFalse((self.local / "ClaudeZhPatch").exists())
+    def test_restore_rejects_damaged_backup_before_writes(self):
+        backup = self.install()
+        (backup / "files" / self.bundle).write_bytes(b"damaged")
+        before = (self.app / self.bundle).read_bytes()
+        with self.assertRaisesRegex(RuntimeError, "备份"):
+            self.restore(backup)
+        self.assertEqual((self.app / self.bundle).read_bytes(), before)
+        self.assertEqual(pack.read_json(self.config)["locale"], "zh-CN")
 
-    def test_backup_directory_cannot_be_inside_data_root(self):
-        with mock.patch.object(installer, "data_roots", return_value={"custom-config": self.local}):
-            with self.assertRaisesRegex(RuntimeError, "递归备份"):
-                installer.install(self.arguments())
-        self.assertFalse((self.local / "ClaudeZhPatch").exists())
+    def test_restore_rejects_conflicting_resource(self):
+        backup = self.install()
+        (self.app / self.bundle).write_bytes(b"other-patch")
+        with self.assertRaisesRegex(RuntimeError, "变化|冲突|源文件"):
+            self.restore(backup)
+        self.assertEqual((self.app / self.bundle).read_bytes(), b"other-patch")
 
-    def test_missing_application_is_prepared_before_removal(self):
-        shutil.rmtree(self.target)
-        original = self.root / "original"
-        original.mkdir()
-        (original / "claude.exe").write_bytes(b"fixture-core")
-        def create_copy(source, target, manifest):
-            self.assertTrue((self.local / "ClaudeZhPatch/backups").is_dir())
-            self.events.append("copy")
-            shutil.copytree(source, target)
-        with mock.patch.object(installer.pack, "find_app", return_value=original), mock.patch.object(installer.pack, "check_source"), mock.patch.object(installer.pack, "create_copy", create_copy):
-            self.install_confirmed()
-        self.assertEqual(self.events, ["copy", "remove", "shortcut"])
+    def test_restore_removes_locale_if_original_had_none(self):
+        pack.write_json(self.config, {"model": "model-a"})
+        backup = self.install()
+        self.restore(backup)
+        self.assertEqual(pack.read_json(self.config), {"model": "model-a"})
 
-    def test_language_restore_preserves_new_settings(self):
-        self.install_confirmed()
-        installer.pack.write_json(self.config, {"locale": "zh-CN", "newSetting": 42})
-        installer.restore_language()
-        self.assertEqual(installer.pack.read_json(self.config), {"locale": "en-US", "newSetting": 42})
+    def test_restore_rejects_paths_outside_resource_allowlist(self):
+        backup = self.install()
+        state = pack.read_json(backup / "state.json")
+        state["files"]["../outside"] = {"original": None, "installed": "fake"}
+        pack.write_json(backup / "state.json", state)
+        with self.assertRaisesRegex(RuntimeError, "清单|路径"):
+            self.restore(backup)
 
-    def test_resume_after_uninstall_restores_missing_data(self):
-        def remove_and_interrupt(package):
-            self.remove(package)
-            self.config.unlink()
-            raise RuntimeError("模拟卸载后中断")
-        with mock.patch("builtins.input", return_value="REPLACE"), mock.patch.object(installer, "remove_package", remove_and_interrupt):
-            with self.assertRaisesRegex(RuntimeError, "中断"):
-                installer.install(self.arguments())
-        installer.resume()
-        self.assertEqual(installer.pack.read_json(self.config), {**self.original, "locale": "zh-CN"})
+    def test_restore_recovers_partial_bundle_after_interrupted_install(self):
+        backup = self.install()
+        state = pack.read_json(backup / "state.json")
+        state["phase"] = "prepared"
+        pack.write_json(backup / "state.json", state)
+        (self.app / self.bundle).write_bytes(b"partial-write")
+        self.restore(backup)
+        self.assertEqual((self.app / self.bundle).read_bytes(), self.originals[self.bundle])
+        self.assertEqual(pack.read_json(self.config)["locale"], "en-US")
 
-    def test_resume_keeps_new_settings(self):
-        with mock.patch("builtins.input", return_value="REPLACE"), mock.patch.object(installer, "remove_package", self.remove), mock.patch.object(installer, "install_shortcut", side_effect=RuntimeError("shortcut")):
-            with self.assertRaisesRegex(RuntimeError, "shortcut"):
-                installer.install(self.arguments())
-        installer.pack.write_json(self.config, {"locale": "en-US", "newSetting": 42})
-        installer.resume()
-        self.assertEqual(installer.pack.read_json(self.config), {"locale": "zh-CN", "newSetting": 42})
-
-    def test_corrupt_backup_blocks_resume(self):
-        with mock.patch("builtins.input", return_value="REPLACE"), mock.patch.object(installer, "remove_package", self.remove), mock.patch.object(installer, "install_shortcut", side_effect=RuntimeError("shortcut")):
-            with self.assertRaises(RuntimeError):
-                installer.install(self.arguments())
-        info = installer.pack.read_json(self.local / "ClaudeZhPatch/pending.json")
-        (Path(info["backup"]) / "data/local-Claude-3p/config.json").write_text("corrupt", "utf-8")
-        with self.assertRaisesRegex(RuntimeError, "备份损坏"):
-            installer.resume()
-
-    def test_repeated_install_keeps_data_and_does_not_uninstall(self):
-        self.install_confirmed()
-        self.events.clear()
-        with mock.patch.object(installer, "remove_package", side_effect=AssertionError("不可卸载")):
-            installer.install(self.arguments())
-        self.assertEqual(self.events, ["shortcut"])
-        self.assertEqual(installer.pack.read_json(self.config)["sampleSetting"], {"retained": True})
+    def test_legacy_install_record_is_preserved_without_reusing_migration(self):
+        legacy = {"target": "old-copy", "backup": "old-migration"}
+        pack.write_json(self.storage / "last-install.json", legacy)
+        backup = self.install()
+        self.assertEqual(pack.read_json(backup / "previous-install-record.json"), legacy)
+        self.restore(backup)
+        self.assertEqual(pack.read_json(self.config)["locale"], "en-US")
 
 
 if __name__ == "__main__":

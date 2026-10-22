@@ -1,7 +1,8 @@
 {
   "locale": "zh-CN",
   "displayName": "简体中文",
-  "version": "3.1623.1.0",
+  "version": "3.1623.4.0",
+  "packageFamily": "Claude_pzs8sxrjxfjjc",
   "bundlePath": "resources/ion-dist/assets/v1/shared-52-CTBp1Kd0.js",
   "catalogs": {
     "frontend": {
@@ -33,8 +34,8 @@
     "resources/ion-dist/i18n/en-US.json": "4c215eaca516a6a16d26ed013b4051c8dfa65b3613ce663720fd693ac4499ddb",
     "resources/en-US.json": "e2d728d5f24275b758974284de609ce53926445f2089844f14e710cc706cbed8",
     "resources/ion-dist/i18n/dynamic/en-US.json": "79e1211bbad7a95915bd982f97e36757e8c54cabe00130a6c673e6796d85cee9",
-    "claude.exe": "2900b2c6133e0cc9caba25844baf7857d8374c9e20675b49a11c0c627819e4dd",
-    "resources/app.asar": "29a7566ab710c0607b2316cbc874e0be6f5c3393e04334551696b726dabfb126",
+    "claude.exe": "f35d87420456476d4e58b660207301d646a44663cb50e000bdcdad4c256f5a5a",
+    "resources/app.asar": "68b9db416f68d88620423f8de55d9a77c033ad5a531c02dda34775c45755f534",
     "resources/ion-dist/assets/v1/shared-52-CTBp1Kd0.js": "c73bdcdea4f25a67315e2c25da403a410f1fcbe4b31edc1ccba149a9e59c8f54"
   },
   "installedFiles": {
@@ -42,8 +43,8 @@
     "resources/zh-CN.json": "93814070d042ad165a1a984a675d15e788fb0285dcf5641ae21d419324cdc793",
     "resources/ion-dist/i18n/dynamic/zh-CN.json": "d7cb48d4c6dc59bf45cde7099b57ce7c3daf5e3881548cc131f602536ce7d76a",
     "resources/zh-Hans.json": "93814070d042ad165a1a984a675d15e788fb0285dcf5641ae21d419324cdc793",
-    "resources/ion-dist/assets/v1/shared-52-CTBp1Kd0.js": "853b7fcfd5718b9aadd3c65c9367ca955e6957fb4abd1f4a4b26741107e58a88",
-    "claude.exe": "2900b2c6133e0cc9caba25844baf7857d8374c9e20675b49a11c0c627819e4dd",
-    "resources/app.asar": "29a7566ab710c0607b2316cbc874e0be6f5c3393e04334551696b726dabfb126"
+    "resources/ion-dist/assets/v1/shared-52-CTBp1Kd0.js": "a507aab4559234f332408380f35c9682f2e9a2cb41a0426f3a775b32a49df81c",
+    "claude.exe": "f35d87420456476d4e58b660207301d646a44663cb50e000bdcdad4c256f5a5a",
+    "resources/app.asar": "68b9db416f68d88620423f8de55d9a77c033ad5a531c02dda34775c45755f534"
   }
 }

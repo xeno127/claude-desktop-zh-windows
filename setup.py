@@ -1,323 +1,174 @@
 import argparse
-from datetime import datetime
+import ctypes
 import json
 import os
 from pathlib import Path
-import shutil
-import stat
 import subprocess
 import sys
+import base64
 
 import claude_zh as pack
-
-
-PACKAGE_FAMILY = "AnthropicPBC.Claude_fnn82j28hfe8t"
-PACKAGE_VERSION = "AnthropicPBC.Claude_3.1623.1.0_x64__fnn82j28hfe8t"
-
-
-def local_path(relative):
-    local = os.environ.get("LOCALAPPDATA")
-    if not local:
-        raise RuntimeError("未找到 LOCALAPPDATA；请在 Windows 当前用户会话中运行")
-    return Path(local) / relative
-
-
-def system_query(command):
-    result = subprocess.run(
-        ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command",
-         "$ErrorActionPreference='Stop'; [Console]::OutputEncoding=[Text.UTF8Encoding]::new(); " + command],
-        capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120,
-    )
-    if result.returncode:
-        raise RuntimeError("Windows 操作失败：" + result.stderr.strip())
-    return result.stdout.strip()
 
 
 def literal(value):
     return "'" + str(value).replace("'", "''") + "'"
 
 
-def get_package():
-    output = system_query("@(Get-AppxPackage -Name AnthropicPBC.Claude | Select-Object PackageFullName,PackageFamilyName,InstallLocation) | ConvertTo-Json -Compress")
-    packages = json.loads(output) if output else []
-    if isinstance(packages, dict):
-        packages = [packages]
-    if len(packages) > 1:
-        raise RuntimeError("检测到多个商店包，请先手动处理后再安装")
-    if packages and packages[0]["PackageFullName"] != PACKAGE_VERSION:
-        raise RuntimeError("商店版本不受支持；目前仅支持 3.1623.1.0 x64，未修改安装")
-    return packages[0] if packages else None
+def system_query(command):
+    code = "$ErrorActionPreference='Stop'; [Console]::OutputEncoding=[Text.UTF8Encoding]::new(); " + command
+    encoded = base64.b64encode(code.encode("utf-16-le")).decode("ascii")
+    result = subprocess.run(
+        ["powershell.exe", "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded],
+        capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=90,
+    )
+    if result.returncode:
+        raise RuntimeError("Windows 查询失败：" + result.stderr.strip())
+    return result.stdout.strip()
 
 
-def assert_regular(path):
-    if path.is_symlink() or getattr(path.stat(), "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT:
-        raise RuntimeError(f"发现重解析路径，停止以免备份不完整：{path}")
+def current_sid():
+    return system_query("[Security.Principal.WindowsIdentity]::GetCurrent().User.Value")
 
 
-def inventories(root):
-    assert_regular(root)
-    files = []
-    for directory, folders, names in os.walk(root, followlinks=False, onerror=raise_walk_error):
-        for name in folders + names:
-            path = Path(directory) / name
-            assert_regular(path)
-            if path.is_file():
-                files.append(path)
-    return files
+def ensure_idle():
+    count = system_query("@(Get-Process -Name claude -ErrorAction SilentlyContinue).Count")
+    if count != "0":
+        raise RuntimeError("请先从托盘完全退出 Claude，再运行 install 或 restore；不会强制结束任务")
 
 
-def raise_walk_error(error):
-    raise error
+def get_packages():
+    output = system_query(
+        "@(Get-AppxPackage | Where-Object {$_.Name -in @('Claude','AnthropicPBC.Claude')} | "
+        "Select-Object Name,PackageFamilyName,InstallLocation,@{Name='Version';Expression={$_.Version.ToString()}}) | ConvertTo-Json -Compress"
+    )
+    values = json.loads(output) if output else []
+    return [values] if isinstance(values, dict) else values
 
 
-def data_roots(config):
-    local = local_path("")
-    roaming = Path(os.environ["APPDATA"])
-    candidates = {
-        "local-Claude-3p": local / "Claude-3p",
-        "local-Claude-Data": local / "Claude-Data",
-        "local-Claude": local / "Claude",
-        "roaming-Claude": roaming / "Claude",
-        "roaming-Claude-3p": roaming / "Claude-3p",
-        "store-user-data": local / "Packages" / PACKAGE_FAMILY,
-    }
-    roots = {name: path for name, path in candidates.items() if path.is_dir()}
-    if not any(config.is_relative_to(path.resolve()) for path in roots.values()):
-        roots["custom-config"] = config.parent
-    return roots
+def resolve_app(packages, manifest, supplied=None):
+    matches = [
+        package for package in packages
+        if package["Version"] == manifest["version"]
+        and package["PackageFamilyName"] == manifest["packageFamily"]
+    ]
+    if supplied:
+        candidate = Path(supplied).resolve()
+        matches = [package for package in matches if candidate in {
+            Path(package["InstallLocation"]).resolve(), (Path(package["InstallLocation"]) / "app").resolve()
+        }]
+    if len(matches) != 1:
+        raise RuntimeError("无法唯一定位受支持的官方包：需要 Claude " + manifest["version"] +
+                           " x64（" + manifest["packageFamily"] + "）。未知版本不会覆盖")
+    return (Path(matches[0]["InstallLocation"]) / "app").resolve()
 
 
-def backup_root(source, destination):
-    files = inventories(source)
-    records = {}
-    destination.mkdir(parents=True, exist_ok=False)
-    for path in files:
-        relative = path.relative_to(source)
-        target = destination / relative
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(path, target)
-        digest = pack.sha256(path)
-        if pack.sha256(target) != digest:
-            raise RuntimeError(f"备份校验失败：{relative}")
-        records[str(relative)] = digest
-    if set(files) != set(inventories(source)):
-        raise RuntimeError("备份期间数据文件集合发生变化，请完全退出 Claude 后重试")
-    return records
+def config_path(supplied):
+    if supplied:
+        path = Path(supplied).expanduser().resolve()
+    else:
+        path = Path(os.environ["LOCALAPPDATA"]) / "Claude-3p/config.json"
+    if not path.is_file() or path.suffix.lower() != ".json":
+        raise RuntimeError("未找到第三方模式 config.json；请先启动原版完成配置。官方账号请先用自带语言设置")
+    if not path.is_relative_to(Path(os.environ["USERPROFILE"]).resolve()):
+        raise RuntimeError("配置必须位于当前 Windows 用户目录内，拒绝修改系统或其他用户的配置")
+    pack.config_data(path)
+    return path
 
 
-def verify_backups(backup, state):
-    for name, entry in state["roots"].items():
-        for relative, digest in entry["files"].items():
-            if pack.sha256(backup / "data" / name / relative) != digest:
-                raise RuntimeError(f"备份损坏，已停止：{name}/{relative}")
+def storage_path():
+    return Path(os.environ["LOCALAPPDATA"]) / "ClaudeZhPatch"
 
 
-def verify_live_data(state):
-    for entry in state["roots"].values():
-        root = Path(entry["path"])
-        current = {str(path.relative_to(root)): pack.sha256(path) for path in inventories(root)}
-        if current != entry["files"]:
-            raise RuntimeError("备份后数据发生变化，已停止，尚未卸载商店版。请完全退出相关程序再重试。")
+def elevate():
+    arguments = [sys.executable, "-X", "utf8", str(Path(__file__).resolve()), *sys.argv[1:],
+                 "--elevated", "--expected-sid", current_sid()]
+    launch_arguments = subprocess.list2cmdline(arguments[1:])
+    command = (
+        "$process=Start-Process -FilePath " + literal(arguments[0]) +
+        " -ArgumentList " + literal(launch_arguments) +
+        " -Verb RunAs -WindowStyle Normal -Wait -PassThru -ErrorAction Stop; exit $process.ExitCode"
+    )
+    encoded = base64.b64encode(command.encode("utf-16-le")).decode("ascii")
+    print("需要 UAC 管理员授权以写入官方资源；请使用当前账户，完成后关闭安装结果窗口。", flush=True)
+    return subprocess.run(["powershell.exe", "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded]).returncode
 
 
-def recover_missing_data(backup, state):
-    verify_backups(backup, state)
-    for name, entry in state["roots"].items():
-        if name == "store-user-data":
-            continue
-        root = Path(entry["path"])
-        for relative in entry["files"]:
-            path = root / relative
-            if not path.exists():
-                path.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(backup / "data" / name / relative, path)
-
-
-def write_locale(config, backup):
-    data = pack.read_json(config)
-    path = backup / "locale-backup.json"
-    if not path.exists():
-        pack.write_json(path, {"configPath": str(config), "hadLocale": "locale" in data, "locale": data.get("locale")})
-    data["locale"] = "zh-CN"
-    pack.write_json(config, data)
-
-
-def shortcut_command(target, backup):
-    return f"""
-$programs = [Environment]::GetFolderPath('Programs')
-$backup = {literal(backup / 'shortcuts')}
-$executable = {literal(target / 'claude.exe')}
-[void][IO.Directory]::CreateDirectory($programs)
-[void][IO.Directory]::CreateDirectory($backup)
-$shell = New-Object -ComObject WScript.Shell
-$path = Join-Path $programs 'Claude.lnk'
-$saved = Join-Path $backup 'Claude.lnk'
-if ((Test-Path -LiteralPath $path) -and -not (Test-Path -LiteralPath $saved)) {{
-    Copy-Item -LiteralPath $path -Destination $saved
-}}
-$shortcut = $shell.CreateShortcut($path)
-$shortcut.TargetPath = $executable
-$shortcut.Arguments = '--lang=zh-CN'
-$shortcut.WorkingDirectory = Split-Path -LiteralPath $executable
-$shortcut.IconLocation = $executable + ',0'
-$shortcut.Description = 'Claude'
-$shortcut.Save()
-$verified = $shell.CreateShortcut($path)
-if ($verified.TargetPath -ne $executable -or $verified.Arguments -ne '--lang=zh-CN') {{ throw '快捷方式校验失败' }}
-$extra = Join-Path $programs 'Claude 中文版.lnk'
-if (Test-Path -LiteralPath $extra) {{
-    $item = $shell.CreateShortcut($extra)
-    if ($item.TargetPath -eq $executable) {{
-        $savedExtra = Join-Path $backup 'Claude 中文版.lnk'
-        if (-not (Test-Path -LiteralPath $savedExtra)) {{ Copy-Item -LiteralPath $extra -Destination $savedExtra }}
-        Remove-Item -LiteralPath $extra
-    }}
-}}
-Write-Output $path
-"""
-
-
-def install_shortcut(target, backup):
-    print(system_query(shortcut_command(target, backup)), flush=True)
-
-
-def remove_package(package):
-    system_query("Remove-AppxPackage -Package " + literal(package["PackageFullName"]) + " -ErrorAction Stop")
-    if get_package() is not None:
-        raise RuntimeError("商店包尚未移除；备份及中文程序已保留，请查看恢复说明")
-
-
-def finish(backup, state, manifest):
-    target = Path(state["target"])
-    config = Path(state["config"])
-    pack.verify(target, manifest)
-    recover_missing_data(backup, state)
-    write_locale(config, backup)
-    install_shortcut(target, backup)
-    state["phase"] = "complete"
-    pack.write_json(backup / "migration.json", state)
-    pack.write_json(local_path("ClaudeZhPatch/last-install.json"), {"backup": str(backup), "target": str(target)})
-    print(f"安装完成。以后直接从开始菜单打开 Claude。\n程序：{target}\n数据备份：{backup}\n未自动启动程序。", flush=True)
-
-
-def install(arguments):
+def execute(arguments):
+    if os.name != "nt" or sys.version_info < (3, 10):
+        raise RuntimeError("需要 Windows 和 Python 3.10 或更新版本")
+    if arguments.expected_sid and current_sid() != arguments.expected_sid:
+        raise RuntimeError("管理员账户与原用户不同，停止以免写入另一份配置；请使用同一用户的 UAC 授权")
     manifest = pack.check_pack()
-    target = local_path("Programs/Claude").resolve()
-    package = get_package()
-    config = pack.config_path(arguments.config)
-    if not arguments.config and config.parent.name != "Claude-3p":
-        raise RuntimeError("默认安装只适配第三方网关模式；官方账号模式尚未验证。不会迁移这份配置。")
-    if target.exists():
-        pack.verify(target, manifest)
-        app = None
+    app = resolve_app(get_packages(), manifest, arguments.app)
+    storage = storage_path()
+    if arguments.action == "restore":
+        if arguments.config:
+            raise RuntimeError("restore 使用备份记录中的配置路径，不接受 --config")
+        backup = Path(arguments.backup) if arguments.backup else Path(pack.read_json(storage / "last-install.json")["backup"])
+        payloads = pack.restoration_payloads(app, storage, backup, manifest)
+        _, state = pack.load_state(app, storage, backup, payloads, manifest["sourceFiles"])
+        config_path(state["config"])
+        config = None
     else:
-        app = pack.find_app(arguments.app or (str(Path(package["InstallLocation"]) / "app") if package else None))
-        pack.check_source(app, manifest)
-    roots = data_roots(config)
-    for root in roots.values():
-        if local_path("ClaudeZhPatch").resolve().is_relative_to(root.resolve()) or target.is_relative_to(root.resolve()):
-            raise RuntimeError("配置父目录覆盖了程序或备份目录。请将自定义配置放在独立目录，避免递归备份。")
-    file_count = 0
-    required_space = 1024 * 1024 * 1024
-    for root in roots.values():
-        files = inventories(root)
-        file_count += len(files)
-        required_space += sum(path.stat().st_size for path in files)
-    if shutil.disk_usage(local_path("")).free < required_space:
-        raise RuntimeError("系统盘可用空间不足：需要应用副本和完整数据备份的空间")
-    print(f"安装目录：{target}\n配置：{config}\n将备份 {file_count} 个数据文件。", flush=True)
-    if arguments.check:
-        print("检查通过。未备份、卸载、改配置、写快捷方式或启动应用。", flush=True)
-        return
-    pack.check_no_processes()
-    pending = local_path("ClaudeZhPatch/pending.json")
-    if pending.exists():
-        pending_state = pack.read_json(Path(pack.read_json(pending)["backup"]) / "migration.json")
-        if pending_state["phase"] in {"prepared", "store-removed"} and package is None:
-            raise RuntimeError("发现卸载后的未完成迁移，请先运行 setup.cmd resume，恢复缺失文件并完成设置")
-    if package:
-        print("将移除当前用户的商店版，取消商店自动更新，并移除该包的 Cowork 服务。\n官方账号模式、Cowork 和副本自动更新尚未验证。\n先备份并校验数据，再卸载；不会修改 WindowsApps 权限。", flush=True)
-        if input("确认替换请输入 REPLACE（其他输入取消）：").strip() != "REPLACE":
-            print("已取消，未修改安装。")
-            return
-    pack.check_no_processes()
-    backup = local_path("ClaudeZhPatch/backups") / datetime.now().strftime("%Y%m%d-%H%M%S-%f")
-    backup.mkdir(parents=True, exist_ok=False)
-    state = {"phase": "backing-up", "target": str(target), "config": str(config), "package": package, "roots": {}}
-    pack.write_json(backup / "migration.json", state)
-    for name, root in roots.items():
-        state["roots"][name] = {"path": str(root), "files": backup_root(root, backup / "data" / name)}
-        pack.write_json(backup / "migration.json", state)
-        print(f"已备份并校验：{name}", flush=True)
-    verify_backups(backup, state)
-    if app is not None:
-        pack.create_copy(app, target, manifest)
-    pack.verify(target, manifest)
-    pack.check_no_processes()
-    if get_package() != package:
-        raise RuntimeError("商店包状态发生变化，停止安装；备份及程序副本已保留")
-    verify_live_data(state)
-    state["phase"] = "prepared"
-    pack.write_json(backup / "migration.json", state)
-    pack.write_json(local_path("ClaudeZhPatch/pending.json"), {"backup": str(backup)})
-    if package:
-        remove_package(package)
-    state["phase"] = "store-removed"
-    pack.write_json(backup / "migration.json", state)
-    finish(backup, state, manifest)
-
-
-def resume():
-    pending = local_path("ClaudeZhPatch/pending.json")
-    if not pending.exists():
-        raise RuntimeError("没有待继续的迁移记录")
-    backup = Path(pack.read_json(pending)["backup"])
-    state = pack.read_json(backup / "migration.json")
-    if state["phase"] not in {"prepared", "store-removed"}:
-        raise RuntimeError("记录已完成或尚未准备好；请按恢复说明处理")
-    if Path(state["target"]).resolve() != local_path("Programs/Claude").resolve():
-        raise RuntimeError("记录中的安装目录不匹配，已停止")
-    pack.check_no_processes()
-    if get_package() is not None:
-        raise RuntimeError("商店版仍存在；请重新运行安装，由你确认后才会卸载")
-    finish(backup, state, pack.check_pack())
-
-
-def restore_language():
-    pack.check_no_processes()
-    info = pack.read_json(local_path("ClaudeZhPatch/last-install.json"))
-    state = pack.read_json(Path(info["backup"]) / "locale-backup.json")
-    config = Path(state["configPath"])
-    data = pack.read_json(config)
-    if state["hadLocale"]:
-        data["locale"] = state["locale"]
+        payloads = pack.resource_payloads(app, manifest)
+        pack.validate_current(app, payloads, manifest)
+        if arguments.backup:
+            raise RuntimeError("--backup 仅用于 restore")
+        config = config_path(arguments.config)
+    if arguments.action in {"check", "verify"}:
+        patched = all((app / relative).exists() and pack.sha256(app / relative) == pack.content_hash(content)
+                      for relative, content in payloads.items())
+        print("官方安装：" + str(app))
+        print("中文资源：" + ("已正确安装" if patched else "待安装"))
+        print("默认语言：" + str(pack.config_data(config).get("locale", "未设置")))
+        print("Cowork 服务：" + (system_query(
+            "Get-Service CoworkVMServiceStore -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Status"
+        ) or "未检测到（本工具不安装该服务）"))
+        if arguments.action == "verify" and (not patched or pack.config_data(config).get("locale") != "zh-CN"):
+            raise RuntimeError("中文资源或默认语言尚未正确安装")
+        print("只读检查完成；未写入资源、修改配置或关闭应用。")
+        return 0
+    ensure_idle()
+    if not ctypes.windll.shell32.IsUserAnAdmin():
+        if arguments.elevated:
+            raise RuntimeError("未获得管理员权限")
+        return elevate()
+    if arguments.action == "restore":
+        backup = pack.restore_resources(app, storage, backup, manifest)
+        print("补丁已恢复为安装前的资源及语言字段，保留当前其他配置。")
     else:
-        data.pop("locale", None)
-    pack.write_json(config, data)
-    print("原语言字段已恢复；密钥和其他新设置保持不变。恢复商店版请继续按 docs/恢复与卸载.md 操作。")
+        backup = pack.install_resources(app, config, storage, manifest)
+        print("中文资源和默认语言已就绪。以后从原来的官方 Claude 入口启动即可。")
+    print("官方包、EXE、ASAR、Cowork 服务和启动入口保持原样；未自动启动程序。")
+    if backup:
+        print("本机恢复备份（可能含凭据，不要公开）：" + str(backup))
+    else:
+        print("现有中文补丁已正确安装，未重复写入；本工具没有此次安装的恢复记录。")
+    return 0
 
 
 def main():
-    if os.name != "nt" or sys.version_info < (3, 10):
-        raise RuntimeError("需要 Windows 和 Python 3.10 或更高版本")
-    parser = argparse.ArgumentParser(description="Claude 默认中文安装：先备份，再经确认替换商店包，保留一个 Claude 入口")
-    parser.add_argument("action", nargs="?", choices=["install", "check", "resume", "restore-language"], default="install")
-    parser.add_argument("--app", help="可选，原版 app 目录（仅支持当前语言包的版本）")
-    parser.add_argument("--config", help="可选，已有 config.json 路径")
+    parser = argparse.ArgumentParser(description="Claude 中文资源补丁：保留官方安装与 Cowork")
+    parser.add_argument("action", nargs="?", choices=["install", "check", "verify", "restore"], default="install")
+    parser.add_argument("--app", help="可选，受支持官方注册包的根目录或 app 目录")
+    parser.add_argument("--config", help="可选，已存在的语言配置 JSON；不修改其他字段")
+    parser.add_argument("--backup", help="restore 使用的本工具 backups 子目录")
+    parser.add_argument("--elevated", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--expected-sid", help=argparse.SUPPRESS)
     arguments = parser.parse_args()
-    arguments.check = arguments.action == "check"
-    if arguments.action == "resume":
-        resume()
-    elif arguments.action == "restore-language":
-        restore_language()
-    else:
-        install(arguments)
+    code = 1
+    try:
+        code = execute(arguments)
+    except (OSError, RuntimeError, ValueError, KeyError, TypeError, KeyboardInterrupt, subprocess.SubprocessError) as error:
+        print("操作未完成：" + str(error), file=sys.stderr)
+        print("目录拒绝写入时请停止，不要卸载官方版或反复修改 WindowsApps 权限。参见 docs/恢复与卸载.md。", file=sys.stderr)
+    if arguments.elevated:
+        try:
+            input("按 Enter 关闭此结果窗口…")
+        except (EOFError, KeyboardInterrupt):
+            pass
+    return code
 
 
 if __name__ == "__main__":
-    try:
-        main()
-    except (OSError, RuntimeError, ValueError, EOFError, KeyboardInterrupt, subprocess.SubprocessError) as error:
-        print("安装未完成：", error, file=sys.stderr)
-        print("程序不会自动删除数据或重复卸载。请保留窗口，查看 docs/恢复与卸载.md。", file=sys.stderr)
-        raise SystemExit(1)
+    raise SystemExit(main())

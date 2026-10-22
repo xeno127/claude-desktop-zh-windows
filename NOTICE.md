@@ -1,9 +1,11 @@
 # 来源与许可
 
-本项目为 Claude Desktop 的非官方简体中文界面补丁，与 Anthropic 无隶属关系。
+本项目是Claude Desktop的非官方中文界面补丁，与Anthropic无隶属关系。
 
-中文词表以 [javaht/claude-desktop-zh-cn](https://github.com/javaht/claude-desktop-zh-cn) 的简体中文翻译为基础，补充了 Claude Desktop 3.1623.1.0 新增的条目、动态模型选项和桌面菜单翻译。保留上游 MIT LICENSE 与版权声明。
+中文词表基于[javaht/claude-desktop-zh-cn](https://github.com/javaht/claude-desktop-zh-cn)的简体中文翻译，补充了本地界面新增条目、动态文案和桌面菜单。保留上游MIT LICENSE及版权声明。译文含机器翻译和人工修订，不代表全部文案逐条人工审校。
 
-新增缺失文案经过机器翻译和人工修订；这不等同于所有文案经过人工逐条审校。欢迎通过 issue 或 PR 改进措辞。
+本项目工具和贡献按MIT LICENSE提供。Claude应用、原始界面资源、品牌和商标的权利归各自权利人；该许可不授予重新分发Claude应用或其完整资源的权利。
 
-工具脚本和本项目贡献按 MIT LICENSE 提供。Claude 应用、原始界面资源、品牌及商标的权利归各自权利人；该许可不授予重新分发 Claude 应用的权利。发布包只包含补丁工具、中文 JSON 和说明，不包含 Claude 可执行文件、DLL、app.asar 或完整 JavaScript bundle。安装时从使用者本机复制已安装的 Claude，按版本检查后局部修改语言资源。
+发布内容仅包含工具、中文JSON、测试和文档，不包含Claude EXE、DLL、ASAR或完整前端JS。安装器在用户本机官方安装中备份并局部修改语言资源，不分发程序副本。
+
+本工具不提供账号、模型服务或API代理，不改动用户现有网络接入和请求路由。
